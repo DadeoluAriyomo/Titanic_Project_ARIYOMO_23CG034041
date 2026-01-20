@@ -5,6 +5,15 @@ import os
 import json
 import logging
 from pathlib import Path
+import pandas as pd
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    classification_report,
+)
 
 # ===== LOGGING SETUP =====
 logging.basicConfig(
@@ -24,6 +33,7 @@ class ModelManager:
     _model_metadata = None
     _model_path = Path("model/titanic_survival_model.pkl")
     _metadata_path = Path("model/model_metadata.json")
+    _train_data_path = Path("train.csv")
     
     def __new__(cls):
         if cls._instance is None:
@@ -45,8 +55,12 @@ class ModelManager:
                     self._model_metadata = json.load(f)
                 logger.info(f"✓ Model metadata loaded: Accuracy={self._model_metadata.get('accuracy', 'N/A')}")
             else:
-                logger.warning(f"⚠ Model metadata not found at {self._metadata_path}")
-                self._model_metadata = {}
+                logger.warning(f"⚠ Model metadata not found at {self._metadata_path}; attempting to rebuild from training data")
+                self._model_metadata = self._rebuild_metadata_from_training_data()
+                if self._model_metadata:
+                    logger.info("✓ Model metadata rebuilt and saved to disk")
+                else:
+                    logger.warning("⚠ Could not rebuild metadata; metrics will be unavailable until retraining")
         
         except FileNotFoundError as e:
             logger.error(f"✗ Model file not found: {e}")
@@ -63,6 +77,72 @@ class ModelManager:
     
     def get_metadata(self):
         return self._model_metadata
+
+    def _rebuild_metadata_from_training_data(self):
+        """Rebuild metadata if missing by evaluating the saved model on train.csv.
+
+        This avoids blocking the metrics page when model_metadata.json is absent.
+        """
+        if not self._train_data_path.exists():
+            logger.warning(f"Training data not found at {self._train_data_path}; cannot rebuild metadata")
+            return {}
+
+        try:
+            df = pd.read_csv(self._train_data_path)
+            features = ["Pclass", "Sex", "Age", "Fare", "Embarked"]
+            target = "Survived"
+
+            if not set(features + [target]).issubset(df.columns):
+                logger.error("Training data missing required columns; cannot rebuild metadata")
+                return {}
+
+            df = df[features + [target]].copy()
+
+            # Match training-time preprocessing
+            df["Age"].fillna(df["Age"].median(), inplace=True)
+            df["Embarked"].fillna(df["Embarked"].mode()[0], inplace=True)
+            df["Sex"] = df["Sex"].map({"male": 0, "female": 1})
+            df["Embarked"] = df["Embarked"].map({"S": 0, "C": 1, "Q": 2})
+
+            X = df[features].values
+            y = df[target].values
+
+            # Use the saved scaler to preserve serving-time preprocessing
+            X_scaled = self._scaler.transform(X)
+            y_pred = self._model.predict(X_scaled)
+
+            accuracy = accuracy_score(y, y_pred)
+            precision = precision_score(y, y_pred)
+            recall = recall_score(y, y_pred)
+            f1 = f1_score(y, y_pred)
+            cm = confusion_matrix(y, y_pred)
+            class_report = classification_report(y, y_pred)
+
+            metadata = {
+                "accuracy": float(accuracy),
+                "precision": float(precision),
+                "recall": float(recall),
+                "f1_score": float(f1),
+                "confusion_matrix": cm.tolist(),
+                "classification_report": class_report,
+                "features": features,
+                "target": target,
+                "classes": [0, 1],
+                "class_names": ["Did Not Survive", "Survived"],
+                "rebuilt_from": str(self._train_data_path),
+            }
+
+            # Persist for future runs
+            self._metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._metadata_path, "w") as f:
+                json.dump(metadata, f, indent=2)
+            # Cache in-memory for immediate use
+            self._model_metadata = metadata
+
+            return metadata
+        except Exception as e:
+            logger.error(f"Failed to rebuild metadata: {e}")
+            return {}
     
     def validate_input(self, pclass, sex, age, fare, embarked):
         """Validate input to prevent training/serving drift"""
@@ -157,6 +237,8 @@ def index():
 def get_metrics():
     """API endpoint for model evaluation metrics"""
     metadata = model_manager.get_metadata()
+    if not metadata:
+        metadata = model_manager._rebuild_metadata_from_training_data()
     
     if not metadata:
         return jsonify({
@@ -178,6 +260,8 @@ def get_metrics():
 def metrics():
     """Display model evaluation metrics and confusion matrix"""
     metadata = model_manager.get_metadata()
+    if not metadata:
+        metadata = model_manager._rebuild_metadata_from_training_data()
     
     if not metadata:
         return render_template("metrics.html", 
