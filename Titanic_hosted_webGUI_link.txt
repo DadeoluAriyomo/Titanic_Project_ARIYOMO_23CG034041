@@ -2,5 +2,5 @@ Name: DADEOLU ADEBGOYEGUN ARIYOMO
 Matric Number: 23CG034041
 Machine Learning Algorithm Used: Logistic Regression
 Model Persistence Method Used: Pickle
-Live URL: https://your-render-app-url.onrender.com
+Live URL: https://titanic-project-ariyomo-23cg034041.onrender.com
 GitHub Repository: https://github.com/DadeoluAriyomo/Titanic_Project_ARIYOMO_23CG034041.git
